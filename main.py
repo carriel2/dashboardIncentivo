@@ -69,7 +69,7 @@ def get_accounts():
         'filterValue': 'billing_incentivo',
         'charset': 'UTF-8'
     }
-    response = requests.get(URL_ACCOUNTS, params=params)
+    response = requests.get(URL_ACCOUNTS, params=params, timeout=30)
     data = response.json()
     
     if data.get('result') == 0:
@@ -91,7 +91,7 @@ def get_conversion_time(uid):
         'charset': 'UTF-8'
     }
     
-    response = requests.get(URL_FUNDING, params=params)
+    response = requests.get(URL_FUNDING, params=params, timeout=30)
     data = response.json()
     
     if data.get('result') == 0 and 'responses' in data:
@@ -126,7 +126,7 @@ def get_billing_for_account(uid, email, custom_endtime=None):
         'email': email
     }
     
-    response = requests.get(URL_BILLING, params=params)
+    response = requests.get(URL_BILLING, params=params, timeout=30)
     history_data = response.json()
     
     total_daily_cost = 0.0
@@ -202,6 +202,9 @@ def send_email_report(report_data):
 def process_daily_billing():
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    cursor.execute("DELETE FROM daily_billing WHERE date = ?", (yesterday_date,))
+    conn.commit()
     
     # 1. Fetch current clients from the API
     api_accounts = get_accounts()

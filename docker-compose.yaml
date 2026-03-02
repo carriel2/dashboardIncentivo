@@ -18,7 +18,7 @@ services:
   worker:
     build: .
     container_name: billing_worker
-    command: python scheduler.py
+    command: python -u scheduler.py
     volumes:
       - sqlite_data:/app/data
     restart: unless-stopped
