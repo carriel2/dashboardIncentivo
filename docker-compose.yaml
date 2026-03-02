@@ -28,7 +28,7 @@ services:
       - TZ=America/Sao_Paulo
 
   grafana:
-    image: grafana/grafana-oss:latest
+    image: grafana/grafana-oss:latest-alpine
     container_name: billing_grafana
     network_mode: "host"
     environment:
