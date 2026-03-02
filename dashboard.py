@@ -13,7 +13,7 @@ st.markdown("Acompanhamento histórico de consumo de recursos dos clientes")
 EXCLUDED_EMAILS = ["apresentacao@saveincloud.com"]
 
 # Function to conn DB and load the infos
-@st.cache_data
+@st.cache_data(ttl=600)
 def load_data():
     # Ensures the 'data' directory exists for the Docker volume
     os.makedirs('data', exist_ok=True)
