@@ -27,5 +27,18 @@ services:
     environment:
       - TZ=America/Sao_Paulo
 
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: billing_grafana
+    network_mode: "host"
+    environment:
+      - GF_INSTALL_PLUGINS=frser-sqlite-datasource
+      - TZ=America/Sao_Paulo
+    volumes:
+      - sqlite_data:/app/data
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped 
+
 volumes:
   sqlite_data:
+  grafana_data:
