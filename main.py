@@ -42,7 +42,7 @@ yesterday_start_jelastic = yesterday_obj.strftime("%Y-%m-%d 00:00:00")
 yesterday_end_jelastic = yesterday_obj.strftime("%Y-%m-%d 23:59:59") 
 
 def get_db_connection():
-    """Conecta ao PostgreSQL e garante a criação das tabelas"""
+    """Connects to PostgreSQL and ensures tables creation"""
     conn = psycopg2.connect(
         host=os.getenv("DB_HOST", "db"),
         database=os.getenv("DB_NAME", "billing"),
@@ -52,7 +52,7 @@ def get_db_connection():
     
     cursor = conn.cursor()
     
-    # Tabela 1: O consumo diário normal
+    # Table 1: Standard daily consumption
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS daily_billing (
             id SERIAL PRIMARY KEY,
@@ -63,7 +63,7 @@ def get_db_connection():
         )
     ''')
     
-    # Tabela 2: O Cofre de Conversões
+    # Table 2: Conversions Vault
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS client_conversions (
             uid INTEGER PRIMARY KEY,
@@ -96,7 +96,7 @@ def get_accounts():
     if data.get('result') == 0:
         return data.get('array', [])
     else:
-        print("Erro ao buscar contas:", data)
+        print("Error fetching accounts:", data)
         return []
 
 def get_conversion_time(uid):
@@ -153,7 +153,7 @@ def get_billing_for_account(uid, email, custom_endtime=None):
         for item in items:
             total_daily_cost += item.get('cost', 0.0)
     else:
-        print(f"Aviso: Nenhum dado de consumo encontrado para {email}")
+        print(f"Warning: No consumption data found for {email}")
             
     return total_daily_cost
 
@@ -164,6 +164,7 @@ def send_email_report(report_data):
     msg['To'] = ", ".join(RECEIVER_EMAILS)
     msg['Subject'] = f"Resumo diário Billing Incentivo - {yesterday_date}"
     
+    # Keeping the Email UI in Portuguese
     html_content = f"""
     <html>
     <head>
@@ -205,15 +206,15 @@ def send_email_report(report_data):
     msg.attach(MIMEText(html_content, 'html'))
     
     try:
-        print("\nConectando ao Servidor SMTP...")
+        print("\nConnecting to SMTP Server...")
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
         server.send_message(msg)
         server.quit()
-        print("✅ Email enviado com sucesso!")
+        print("✅ Email sent successfully!")
     except Exception as e:
-        print(f"❌ Falha ao enviar email: {e}")
+        print(f"❌ Failed to send email: {e}")
 
 def process_daily_billing():
     conn = get_db_connection()
@@ -242,7 +243,7 @@ def process_daily_billing():
             
     accounts = [{'uid': uid, 'email': email} for uid, email in accounts_dict.items()]
     
-    print(f"Encontradas {len(accounts)} contas (API + DB). Processando custos para {yesterday_date}...")
+    print(f"Found {len(accounts)} accounts (API + DB). Processing costs for {yesterday_date}...")
     
     report = []
 
@@ -256,12 +257,12 @@ def process_daily_billing():
         is_in_api = uid in api_uids
         
         if not is_in_api:
-            # O cliente sumiu da API (saiu do billing_incentivo). Vamos ver se ele pagou!
+            # The client disappeared from the API (left billing_incentivo). Let's check if they paid!
             exact_leave_time = get_conversion_time(uid)
             
             if exact_leave_time:
-                # Registra o cliente na tabela de estatísticas como CONVERTIDO!
-                # O "ON CONFLICT" impede que ele seja duplicado
+                # Registers the client in the statistics table as CONVERTED!
+                # The "ON CONFLICT" prevents duplication
                 cursor.execute('''
                     INSERT INTO client_conversions (uid, email, conversion_date)
                     VALUES (%s, %s, %s)
@@ -284,6 +285,7 @@ def process_daily_billing():
         ''', (uid, day_before_yesterday_date))
         day_before_yesterday_result = cursor.fetchone()
         
+        # Since Postgres returns Decimal, we ensure conversion to float
         day_before_yesterday_consumption = float(day_before_yesterday_result[0]) if day_before_yesterday_result else 0.0
         
         if day_before_yesterday_consumption > 0:
@@ -291,7 +293,7 @@ def process_daily_billing():
         else:
             variation_pct = 0.0 
             
-        # O insert na daily_billing continua puro
+        # The insert into daily_billing remains pure
         cursor.execute('''
             INSERT INTO daily_billing (date, uid, email, consumption)
             VALUES (%s, %s, %s, %s)
@@ -308,7 +310,7 @@ def process_daily_billing():
     cursor.close()
     conn.close()
     
-    print("\n--- Relatório Preliminar ---")
+    print("\n--- Preliminary Report ---")
     for r in report:
         print(f"{r['email']} | R$ {r['consumption']:.4f} | {r['variation']}")
 

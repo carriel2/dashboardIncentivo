@@ -3,3 +3,4 @@ billing_history.db
 .env
 __pycache__/
 data/
+bkp_billing.sql
