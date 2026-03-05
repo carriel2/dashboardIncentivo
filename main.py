@@ -69,6 +69,17 @@ def get_db_connection():
         )
     ''')
     
+    # Table 3: Daily Funding (Recargas)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS daily_funding (
+            id SERIAL PRIMARY KEY,
+            date TIMESTAMP,
+            uid INTEGER,
+            email VARCHAR(255),
+            amount NUMERIC(10, 4)
+        )
+    ''')
+    
     conn.commit()
     cursor.close()
     return conn
@@ -120,6 +131,33 @@ def get_conversion_time(uid, start_time, end_time):
             return conversion_date.strftime("%Y-%m-%d %H:%M:%S")
             
     return None 
+
+def get_funding_amount_for_account(uid, start_time, end_time):
+    """Busca o valor total recarregado pelo cliente no período"""
+    params = {
+        'appid': APPID,
+        'session': SESSION_TOKEN,
+        'uid': uid,
+        'starttime': start_time,
+        'endtime': end_time,
+        'startRow': 0,
+        'resultCount': 100,
+        'charset': 'UTF-8'
+    }
+    
+    response = requests.get(URL_FUNDING, params=params, timeout=30)
+    data = response.json()
+    
+    total_funding = 0.0
+    
+    if data.get('result') == 0 and 'responses' in data:
+        # Pega apenas os registros do tipo 'FUND' (Pagamentos/Recargas)
+        fundings = [r for r in data['responses'] if r.get('chargeType') == 'FUND']
+        for f in fundings:
+            # A Jelastic geralmente retorna o valor recarregado no campo 'amount'
+            total_funding += f.get('amount', 0.0) 
+            
+    return total_funding
 
 def get_billing_for_account(uid, email, start_time, end_time, custom_endtime=None):
     """Fetches the consumption of a specific account for yesterday's period"""
@@ -241,6 +279,7 @@ def process_daily_billing(target_today_date):
     
 
     cursor.execute("DELETE FROM daily_billing WHERE date = %s", (yesterday_date,))
+    cursor.execute("DELETE FROM daily_funding WHERE date = %s", (yesterday_date,))
     conn.commit()
     
     api_accounts = get_accounts()
@@ -312,6 +351,15 @@ def process_daily_billing(target_today_date):
             VALUES (%s, %s, %s, %s)
         ''', (yesterday_date, uid, email, yesterday_consumption))
         
+        yesterday_funding = get_funding_amount_for_account(uid, yesterday_start_jelastic, yesterday_end_jelastic)
+        
+        if yesterday_funding > 0.0:
+            cursor.execute('''
+                INSERT INTO daily_funding (date, uid, email, amount)
+                VALUES (%s, %s, %s, %s)
+            ''', (yesterday_date, uid, email, yesterday_funding))
+        
+        
         trend = "⬆️" if variation_pct > 0 else "⬇️" if variation_pct < 0 else "➖"
         report.append({
             'email': email,
@@ -339,14 +387,14 @@ if __name__ == '__main__':
     # Após rodar com sucesso, comente isso aqui de volta!
     # ====================================================================
     
-     #dates_to_fix = [
-         #datetime.date(2026, 3, 2), # Vai apagar e refazer o dia 01/03
-         #datetime.date(2026, 3, 3), # Vai apagar e refazer o dia 02/03
-         #datetime.date(2026, 3, 4), # Vai apagar e refazer o dia 03/03
-         #datetime.date(2026, 3, 5), # Vai apagar e refazer o dia 04/03
-     #]
-     #for d in dates_to_fix:
-         #process_daily_billing(d)
+    #  dates_to_fix = [
+    #      datetime.date(2026, 3, 2), # Vai apagar e refazer o dia 01/03
+    #      datetime.date(2026, 3, 3), # Vai apagar e refazer o dia 02/03
+    #      datetime.date(2026, 3, 4), # Vai apagar e refazer o dia 03/03
+    #      datetime.date(2026, 3, 5), # Vai apagar e refazer o dia 04/03
+    #  ]
+    #  for d in dates_to_fix:
+    #      process_daily_billing(d)
         
     
     # ====================================================================
