@@ -1,5 +1,5 @@
 import requests
-import sqlite3
+import psycopg2
 import os
 import datetime
 from datetime import timedelta
@@ -24,36 +24,53 @@ RECEIVER_EMAILS = [email.strip() for email in receiver_emails_env.split(",")]
 # Global Configurations
 SESSION_TOKEN = os.getenv("SESSION_TOKEN")
 APPID = os.getenv("APPID", "cluster")
-URL_ACCOUNTS = "https://jca.jelastic.saveincloud.net/JBilling/billing/account/rest/getaccounts"
-URL_BILLING = "https://jca.jelastic.saveincloud.net/JBilling/billing/account/rest/getaccountbillinghistorybyperiodinner"
-URL_FUNDING = "https://jca.jelastic.saveincloud.net/JBilling/billing/account/rest/getfundaccounthistory"
+URL_ACCOUNTS = "https://jca.paas.saveincloud.net.br/JBilling/billing/account/rest/getaccounts"
+URL_BILLING = "https://jca.paas.saveincloud.net.br/JBilling/billing/account/rest/getaccountbillinghistorybyperiodinner"
+URL_FUNDING = "https://jca.paas.saveincloud.net.br/JBilling/billing/account/rest/getfundaccounthistory"
 
 # Emails that should NEVER appear in the metrics
 EXCLUDED_EMAILS = ["apresentacao@saveincloud.com"]
 
-# Defining dates (Calculating "Yesterday's" consumption with JCA Precision)
-yesterday_obj = datetime.date.today() - timedelta(days=1)
-yesterday_date = yesterday_obj.strftime("%Y-%m-%d")
-yesterday_start_jelastic = yesterday_obj.strftime("%Y-%m-%d 00:00:00")
-yesterday_end_jelastic = yesterday_obj.strftime("%Y-%m-%d 23:59:59") 
+# =========================================================================
+# 🛑 VARIÁVEIS DE DATA REMOVIDAS DAQUI DO ESCOPO GLOBAL! 🛑
+# Agora elas são calculadas em tempo real dentro da função principal
+# para evitar que o Docker congele a data de execução.
+# =========================================================================
 
 def get_db_connection():
-    # Ensures the 'data' directory exists for the Docker volume
-    os.makedirs('data', exist_ok=True)
+    """Connects to PostgreSQL and ensures tables creation"""
+    conn = psycopg2.connect(
+        host=os.getenv("DB_HOST", "db"),
+        database=os.getenv("DB_NAME", "billing"),
+        port=os.getenv("DB_PORT", "5432"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD")
+    )
     
-    conn = sqlite3.connect('data/billing_history.db')
+    cursor = conn.cursor()
     
-    # Auto-creates the table if starting from scratch
-    conn.execute('''
+    # Table 1: Standard daily consumption
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS daily_billing (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
+            id SERIAL PRIMARY KEY,
+            date TIMESTAMP,
             uid INTEGER,
-            email TEXT,
-            consumption REAL
+            email VARCHAR(255),
+            consumption NUMERIC(10, 4)
         )
     ''')
+    
+    # Table 2: Conversions Vault
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS client_conversions (
+            uid INTEGER PRIMARY KEY,
+            email VARCHAR(255),
+            conversion_date TIMESTAMP
+        )
+    ''')
+    
     conn.commit()
+    cursor.close()
     return conn
 
 def get_accounts():
@@ -75,17 +92,17 @@ def get_accounts():
     if data.get('result') == 0:
         return data.get('array', [])
     else:
-        print("Erro ao buscar contas:", data)
+        print("Error fetching accounts:", data)
         return []
 
-def get_conversion_time(uid):
+def get_conversion_time(uid, start_time, end_time):
     """Fetches the exact time a user made their first funding payment yesterday"""
     params = {
         'appid': APPID,
         'session': SESSION_TOKEN,
         'uid': uid,
-        'starttime': yesterday_start_jelastic,
-        'endtime': yesterday_end_jelastic,
+        'starttime': start_time,
+        'endtime': end_time,
         'startRow': 0,
         'resultCount': 100,
         'charset': 'UTF-8'
@@ -95,23 +112,19 @@ def get_conversion_time(uid):
     data = response.json()
     
     if data.get('result') == 0 and 'responses' in data:
-        # Sort responses to get the earliest 'FUND' operation
         fundings = [r for r in data['responses'] if r.get('chargeType') == 'FUND']
         if fundings:
             fundings.sort(key=lambda x: x['operationDate'])
             first_funding_ms = fundings[0]['operationDate']
-            
-            # Convert Unix timestamp (ms) to string format: YYYY-MM-DD HH:MM:SS
             conversion_date = datetime.datetime.fromtimestamp(first_funding_ms / 1000.0)
             return conversion_date.strftime("%Y-%m-%d %H:%M:%S")
             
-    # Fallback: if no funding found, use the end of the day
-    return yesterday_end_jelastic
+    return None 
 
-def get_billing_for_account(uid, email, custom_endtime=None):
+def get_billing_for_account(uid, email, start_time, end_time, custom_endtime=None):
     """Fetches the consumption of a specific account for yesterday's period"""
     if custom_endtime is None:
-        custom_endtime = yesterday_end_jelastic
+        custom_endtime = end_time
 
     params = {
         'appid': APPID,
@@ -121,7 +134,7 @@ def get_billing_for_account(uid, email, custom_endtime=None):
         'uid': uid,
         'node': 'root',
         'charset': 'UTF-8',
-        'starttime': yesterday_start_jelastic,
+        'starttime': start_time,
         'endtime': custom_endtime, 
         'email': email
     }
@@ -134,20 +147,23 @@ def get_billing_for_account(uid, email, custom_endtime=None):
     if history_data.get('result') == 0 and 'array' in history_data:
         items = history_data['array']
         for item in items:
-            # Sums only the 'cost' field, matching JCA behavior
             total_daily_cost += item.get('cost', 0.0)
     else:
-        print(f"Aviso: Nenhum dado de consumo encontrado para {email}")
+        print(f"Warning: No consumption data found for {email}")
             
     return total_daily_cost
 
-def send_email_report(report_data):
+def send_email_report(report_data, report_date_str, report_obj_date):
     """Generates an HTML email report and sends it to the recipients"""
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = ", ".join(RECEIVER_EMAILS)
-    msg['Subject'] = f"Resumo diário Billing Incentivo - {yesterday_date}"
+    msg['Subject'] = f"Resumo diário Billing Incentivo - {report_date_str}"
     
+    # 1. Calcula o total somando o consumo de todo mundo da lista
+    total_consumption = sum(row['consumption'] for row in report_data)
+    
+    # Keeping the Email UI in Portuguese
     html_content = f"""
     <html>
     <head>
@@ -157,11 +173,12 @@ def send_email_report(report_data):
             th, td {{ border: 1px solid #dddddd; text-align: left; padding: 10px; }}
             th {{ background-color: #0056b3; color: white; }}
             tr:nth-child(even) {{ background-color: #f9f9f9; }}
+            .total-row {{ background-color: #d1ecf1; font-weight: bold; color: #0c5460; }}
         </style>
     </head>
     <body>
-        <h2>Resumo Billing Incentivo - {yesterday_date}</h2>
-        <p>Aqui está o resumo do consumo referente a <b>{yesterday_date}</b> comparado ao dia anterior.</p>
+        <h2>Resumo Billing Incentivo - {report_obj_date.strftime("%d/%m/%Y")}</h2>
+        <p>Aqui está o resumo do consumo referente ao dia anterior.</p>
         <table>
             <tr>
                 <th>Email</th>
@@ -169,6 +186,8 @@ def send_email_report(report_data):
                 <th>Variação (%)</th>
             </tr>
     """
+    
+    # 2. Preenche as linhas dos clientes
     for row in report_data:
         html_content += f"""
             <tr>
@@ -177,7 +196,14 @@ def send_email_report(report_data):
                 <td>{row['variation']}</td>
             </tr>
         """
-    html_content += """
+        
+    # 3. Adiciona a linha do TOTAL destacada no final
+    html_content += f"""
+            <tr class="total-row">
+                <td>TOTAL GERAL</td>
+                <td>R$ {total_consumption:.4f}</td>
+                <td>➖</td>
+            </tr>
         </table>
         <p style="margin-top: 20px; font-size: 12px; color: #777;">
             <i>Relatório gerado automaticamente via Python.</i>
@@ -189,48 +215,53 @@ def send_email_report(report_data):
     msg.attach(MIMEText(html_content, 'html'))
     
     try:
-        print("\nConectando ao Servidor SMTP...")
+        print("\nConnecting to SMTP Server...")
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
         server.send_message(msg)
         server.quit()
-        print("✅ Email enviado com sucesso!")
+        print("✅ Email sent successfully!")
     except Exception as e:
-        print(f"❌ Falha ao enviar email: {e}")
+        print(f"❌ Failed to send email: {e}")
+
+def process_daily_billing(target_today_date):
+
+    yesterday_obj = target_today_date - timedelta(days=1)
+    yesterday_date = yesterday_obj.strftime("%Y-%m-%d 00:00:00") 
+
+    day_before_yesterday_obj = yesterday_obj - timedelta(days=1)
+    day_before_yesterday_date = day_before_yesterday_obj.strftime("%Y-%m-%d 00:00:00")
+
+    yesterday_start_jelastic = yesterday_obj.strftime("%Y-%m-%d 00:00:00")
+    yesterday_end_jelastic = yesterday_obj.strftime("%Y-%m-%d 23:59:59") 
     
-def process_daily_billing():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute("DELETE FROM daily_billing WHERE date = ?", (yesterday_date,))
+
+    cursor.execute("DELETE FROM daily_billing WHERE date = %s", (yesterday_date,))
     conn.commit()
     
-    # 1. Fetch current clients from the API
     api_accounts = get_accounts()
     
-    # Set to check if client is active in API today
     api_uids = {acc['uid'] for acc in api_accounts}
-    
-    # Dictionary to store unique clients (key: uid, value: email)
     accounts_dict = {acc['uid']: acc['email'] for acc in api_accounts}
     
-    # 2. Fetch clients that were active yesterday from the DB
     cursor.execute('''
         SELECT DISTINCT uid, email FROM daily_billing 
-        WHERE date = date(?, '-1 day')
-    ''', (yesterday_date,))
+        WHERE date = %s
+    ''', (day_before_yesterday_date,))
     db_accounts = cursor.fetchall()
     
-    # 3. Merge lists: Add clients found in the DB but missing from the API
     for uid, email in db_accounts:
         if uid not in accounts_dict:
             accounts_dict[uid] = email
             
-    # Rebuild the accounts list for the processing loop
     accounts = [{'uid': uid, 'email': email} for uid, email in accounts_dict.items()]
     
-    print(f"Encontradas {len(accounts)} contas (API + DB). Processando custos para {yesterday_date}...")
+    print(f"\n[!] Data de Referência do processamento: {yesterday_date[:10]}")
+    print(f"Found {len(accounts)} accounts (API + DB). Processing costs...")
     
     report = []
 
@@ -238,31 +269,38 @@ def process_daily_billing():
         uid = account['uid']
         email = account['email']
         
-        # Ignore Blacklisted accounts
         if email in EXCLUDED_EMAILS:
             continue
             
-        # Check if the client is currently in the Jelastic API group
         is_in_api = uid in api_uids
         
-        # --- Precision Billing for converted clients ---
         if not is_in_api:
-            exact_leave_time = get_conversion_time(uid)
-            yesterday_consumption = get_billing_for_account(uid, email, custom_endtime=exact_leave_time)
+            exact_leave_time = get_conversion_time(uid, yesterday_start_jelastic, yesterday_end_jelastic)
             
-            # Break the infinite loop for departed clients
+            if exact_leave_time:
+                cursor.execute('''
+                    INSERT INTO client_conversions (uid, email, conversion_date)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (uid) DO NOTHING
+                ''', (uid, email, exact_leave_time))
+                conn.commit()
+                
+                yesterday_consumption = get_billing_for_account(uid, email, yesterday_start_jelastic, yesterday_end_jelastic, custom_endtime=exact_leave_time)
+            else:
+                yesterday_consumption = get_billing_for_account(uid, email, yesterday_start_jelastic, yesterday_end_jelastic)
+                
             if yesterday_consumption == 0.0:
                 continue
         else:
-            yesterday_consumption = get_billing_for_account(uid, email)
+            yesterday_consumption = get_billing_for_account(uid, email, yesterday_start_jelastic, yesterday_end_jelastic)
             
         cursor.execute('''
             SELECT consumption FROM daily_billing 
-            WHERE uid = ? AND date = date(?, '-1 day')
-        ''', (uid, yesterday_date))
+            WHERE uid = %s AND date = %s
+        ''', (uid, day_before_yesterday_date))
         day_before_yesterday_result = cursor.fetchone()
         
-        day_before_yesterday_consumption = day_before_yesterday_result[0] if day_before_yesterday_result else 0.0
+        day_before_yesterday_consumption = float(day_before_yesterday_result[0]) if day_before_yesterday_result else 0.0
         
         if day_before_yesterday_consumption > 0:
             variation_pct = ((yesterday_consumption - day_before_yesterday_consumption) / day_before_yesterday_consumption) * 100
@@ -271,7 +309,7 @@ def process_daily_billing():
             
         cursor.execute('''
             INSERT INTO daily_billing (date, uid, email, consumption)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
         ''', (yesterday_date, uid, email, yesterday_consumption))
         
         trend = "⬆️" if variation_pct > 0 else "⬇️" if variation_pct < 0 else "➖"
@@ -282,14 +320,39 @@ def process_daily_billing():
         })
 
     conn.commit()
+    cursor.close()
     conn.close()
     
-    print("\n--- Relatório Preliminar ---")
+    print("--- Preliminary Report ---")
     for r in report:
         print(f"{r['email']} | R$ {r['consumption']:.4f} | {r['variation']}")
 
+
     if report:
-        send_email_report(report)
+        send_email_report(report, yesterday_date[:10], yesterday_obj)
+
 
 if __name__ == '__main__':
-    process_daily_billing()
+    # ====================================================================
+    # 🟢 MODO BACKFILL (MÁQUINA DO TEMPO)
+    # Descomente este bloco, rode o script, e ele vai reprocessar o passado.
+    # Após rodar com sucesso, comente isso aqui de volta!
+    # ====================================================================
+    
+     #dates_to_fix = [
+         #datetime.date(2026, 3, 2), # Vai apagar e refazer o dia 01/03
+         #datetime.date(2026, 3, 3), # Vai apagar e refazer o dia 02/03
+         #datetime.date(2026, 3, 4), # Vai apagar e refazer o dia 03/03
+         #datetime.date(2026, 3, 5), # Vai apagar e refazer o dia 04/03
+     #]
+     #for d in dates_to_fix:
+         #process_daily_billing(d)
+        
+    
+    # ====================================================================
+    # 🔵 MODO PRODUÇÃO NORMAL
+    # É isso que deve ficar ativado lá no Docker da SaveinCloud.
+    # A data do momento em que a função dispara!
+    # ====================================================================
+    
+    process_daily_billing(datetime.date.today())
