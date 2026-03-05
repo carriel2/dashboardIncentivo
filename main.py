@@ -1,5 +1,5 @@
 import requests
-import psycopg2
+import mysql.connector
 import os
 import datetime
 from datetime import timedelta
@@ -25,50 +25,56 @@ RECEIVER_EMAILS = [email.strip() for email in receiver_emails_env.split(",")]
 SESSION_TOKEN = os.getenv("SESSION_TOKEN")
 APPID = os.getenv("APPID", "cluster")
 URL_ACCOUNTS = "https://jca.jelastic.saveincloud.net/JBilling/billing/account/rest/getaccounts"
-URL_BILLING = "https://jca.jelastic.saveincloud.net/JBilling/billing/account/rest/getaccountbillinghistorybyperiodinner"
 URL_FUNDING = "https://jca.jelastic.saveincloud.net/JBilling/billing/account/rest/getfundaccounthistory"
 
 # Emails that should NEVER appear in the metrics
 EXCLUDED_EMAILS = ["apresentacao@saveincloud.com"]
 
-# Defining dates (Calculating "Yesterday's" consumption with JCA Precision)
-yesterday_obj = datetime.date.today() - timedelta(days=1)
-yesterday_date = yesterday_obj.strftime("%Y-%m-%d 00:00:00") 
+# ==========================================
+# 🛑 BLOCO DE DATAS PARA TESTE DEV LOCAL (MySQL Dev DB) 🛑
+yesterday_date = "2026-03-02 00:00:00" 
+day_before_yesterday_date = "2026-03-01 00:00:00"
+yesterday_start_jelastic = "2026-03-02 00:00:00"
+yesterday_end_jelastic = "2026-03-02 23:59:59" 
+yesterday_display = "02/03/2026"
 
-day_before_yesterday_obj = yesterday_obj - timedelta(days=1)
-day_before_yesterday_date = day_before_yesterday_obj.strftime("%Y-%m-%d 00:00:00")
-
-yesterday_start_jelastic = yesterday_obj.strftime("%Y-%m-%d 00:00:00")
-yesterday_end_jelastic = yesterday_obj.strftime("%Y-%m-%d 23:59:59") 
+# 🟢 BLOCO DE DATAS PARA PRODUÇÃO 🟢
+# (Descomente estas linhas e apague as de cima quando for para produção)
+# yesterday_obj = datetime.date.today() - timedelta(days=1)
+# yesterday_date = yesterday_obj.strftime("%Y-%m-%d 00:00:00") 
+# day_before_yesterday_obj = yesterday_obj - timedelta(days=1)
+# day_before_yesterday_date = day_before_yesterday_obj.strftime("%Y-%m-%d 00:00:00")
+# yesterday_start_jelastic = yesterday_obj.strftime("%Y-%m-%d 00:00:00")
+# yesterday_end_jelastic = yesterday_obj.strftime("%Y-%m-%d 23:59:59") 
+# yesterday_display = yesterday_obj.strftime("%d/%m/%Y")
+# ==========================================
 
 def get_db_connection():
-    """Connects to PostgreSQL and ensures tables creation"""
-    conn = psycopg2.connect(
-        host=os.getenv("DB_HOST", "db"),
-        database=os.getenv("DB_NAME", "billing"),
-        user=os.getenv("DB_USER", "postgres"),
+    """Connects to MySQL Central and ensures auxiliary tables creation"""
+    conn = mysql.connector.connect(
+        host=os.getenv("DB_HOST"),
+        port=int(os.getenv("DB_PORT", 3306)),
+        database=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD")
     )
     
     cursor = conn.cursor()
     
-    # Table 1: Standard daily consumption
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS daily_billing (
-            id SERIAL PRIMARY KEY,
-            date TIMESTAMP,
-            uid INTEGER,
-            email VARCHAR(255),
-            consumption NUMERIC(10, 4)
-        )
-    ''')
-    
-    # Table 2: Conversions Vault
+    # Table 1: Conversions Vault (MySQL Syntax)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS client_conversions (
-            uid INTEGER PRIMARY KEY,
+            uid INT PRIMARY KEY,
             email VARCHAR(255),
-            conversion_date TIMESTAMP
+            conversion_date DATETIME
+        )
+    ''')
+
+    # Table 2: Active clients tracking (Resolves the JCA Amnesia problem)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tracked_clients (
+            uid INT PRIMARY KEY,
+            email VARCHAR(255)
         )
     ''')
     
@@ -78,7 +84,7 @@ def get_db_connection():
     return conn
 
 def get_accounts():
-    """Fetches accounts from the billing_incentivo group"""
+    """Fetches ONLY active accounts from the billing_incentivo group today"""
     params = {
         'appid': APPID,
         'session': SESSION_TOKEN,
@@ -100,7 +106,7 @@ def get_accounts():
         return []
 
 def get_conversion_time(uid):
-    """Fetches the exact time a user made their first funding payment yesterday"""
+    """Fetches the exact time a user made their first funding payment"""
     params = {
         'appid': APPID,
         'session': SESSION_TOKEN,
@@ -125,46 +131,23 @@ def get_conversion_time(uid):
             
     return None 
 
-def get_billing_for_account(uid, email, custom_endtime=None):
-    """Fetches the consumption of a specific account for yesterday's period"""
-    if custom_endtime is None:
-        custom_endtime = yesterday_end_jelastic
-
-    params = {
-        'appid': APPID,
-        'session': SESSION_TOKEN,
-        'period': 'day',
-        'groupNodes': 'false',
-        'uid': uid,
-        'node': 'root',
-        'charset': 'UTF-8',
-        'starttime': yesterday_start_jelastic,
-        'endtime': custom_endtime, 
-        'email': email
-    }
-    
-    response = requests.get(URL_BILLING, params=params, timeout=30)
-    history_data = response.json()
-    
-    total_daily_cost = 0.0
-    
-    if history_data.get('result') == 0 and 'array' in history_data:
-        items = history_data['array']
-        for item in items:
-            total_daily_cost += item.get('cost', 0.0)
-    else:
-        print(f"Warning: No consumption data found for {email}")
-            
-    return total_daily_cost
+def get_cost_from_db(cursor, uid, date_str):
+    """Fetches the daily consumption directly from Central MySQL DB"""
+    cursor.execute('''
+        SELECT cost FROM billing_history 
+        WHERE user_id = %s AND date = %s
+    ''', (uid, date_str))
+    result = cursor.fetchone()
+    # Converte o retorno decimal do MySQL para float
+    return float(result[0]) if result else 0.0
 
 def send_email_report(report_data):
     """Generates an HTML email report and sends it to the recipients"""
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = ", ".join(RECEIVER_EMAILS)
-    msg['Subject'] = f"Resumo diário Billing Incentivo - {yesterday_date}"
+    msg['Subject'] = f"Resumo diário Billing Incentivo - {yesterday_display}"
     
-    # Keeping the Email UI in Portuguese
     html_content = f"""
     <html>
     <head>
@@ -177,8 +160,8 @@ def send_email_report(report_data):
         </style>
     </head>
     <body>
-        <h2>Resumo Billing Incentivo - {yesterday_obj.strftime("%d/%m/%Y")}</h2>
-        <p>Aqui está o resumo do consumo referente ao dia anterior.</p>
+        <h2>Resumo Billing Incentivo - {yesterday_display}</h2>
+        <p>Resumo do consumo diário (Extraído do Banco Central MySQL).</p>
         <table>
             <tr>
                 <th>Email</th>
@@ -220,93 +203,76 @@ def process_daily_billing():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute("DELETE FROM daily_billing WHERE date = %s", (yesterday_date,))
-    conn.commit()
-    
-    # 1. Fetch current clients from the API
+    # 1. Fetch current clients from the API (WHO IS ACTIVE TODAY)
     api_accounts = get_accounts()
+    api_dict = {acc['uid']: acc['email'] for acc in api_accounts}
     
-    api_uids = {acc['uid'] for acc in api_accounts}
-    accounts_dict = {acc['uid']: acc['email'] for acc in api_accounts}
-    
-    # 2. Fetch clients that were active yesterday from the DB
-    cursor.execute('''
-        SELECT DISTINCT uid, email FROM daily_billing 
-        WHERE date = %s
-    ''', (day_before_yesterday_date,))
+    # 2. Fetch clients that were active yesterday from the Tracking Table
+    cursor.execute('SELECT uid, email FROM tracked_clients')
     db_accounts = cursor.fetchall()
+    db_dict = {row[0]: row[1] for row in db_accounts}
     
-    # 3. Merge lists
-    for uid, email in db_accounts:
-        if uid not in accounts_dict:
-            accounts_dict[uid] = email
+    report_accounts = []
+
+    # 3. Crossing Logic: Who was here yesterday but left today? (Conversions)
+    for uid, email in db_dict.items():
+        if uid not in api_dict:
+            exact_leave_time = get_conversion_time(uid)
+            if exact_leave_time:
+                # MySQL uses INSERT IGNORE to prevent duplicates
+                cursor.execute('''
+                    INSERT IGNORE INTO client_conversions (uid, email, conversion_date)
+                    VALUES (%s, %s, %s)
+                ''', (uid, email, exact_leave_time))
             
-    accounts = [{'uid': uid, 'email': email} for uid, email in accounts_dict.items()]
-    
-    print(f"Found {len(accounts)} accounts (API + DB). Processing costs for {yesterday_date}...")
+            # Remove from active tracking
+            cursor.execute('DELETE FROM tracked_clients WHERE uid = %s', (uid,))
+            # Adds to report calculation (because they still consumed yesterday)
+            report_accounts.append({'uid': uid, 'email': email})
+
+    # 4. Crossing Logic: Who is new today? (New Entries)
+    for uid, email in api_dict.items():
+        if uid not in db_dict:
+            # MySQL uses INSERT IGNORE
+            cursor.execute('''
+                INSERT IGNORE INTO tracked_clients (uid, email)
+                VALUES (%s, %s)
+            ''', (uid, email))
+        
+        # Adds to report calculation
+        report_accounts.append({'uid': uid, 'email': email})
+
+    conn.commit()
+    print(f"Processando os custos de {len(report_accounts)} clientes direto do banco...")
     
     report = []
 
-    for account in accounts:
-        uid = account['uid']
-        email = account['email']
+    # 5. Fast Cost Calculation via MySQL Central DB
+    for acc in report_accounts:
+        uid = acc['uid']
+        email = acc['email']
         
         if email in EXCLUDED_EMAILS:
             continue
             
-        is_in_api = uid in api_uids
+        yesterday_cost = get_cost_from_db(cursor, uid, yesterday_date)
+        day_before_cost = get_cost_from_db(cursor, uid, day_before_yesterday_date)
         
-        if not is_in_api:
-            # The client disappeared from the API (left billing_incentivo). Let's check if they paid!
-            exact_leave_time = get_conversion_time(uid)
+        if yesterday_cost == 0.0:
+            continue
             
-            if exact_leave_time:
-                # Registers the client in the statistics table as CONVERTED!
-                # The "ON CONFLICT" prevents duplication
-                cursor.execute('''
-                    INSERT INTO client_conversions (uid, email, conversion_date)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (uid) DO NOTHING
-                ''', (uid, email, exact_leave_time))
-                conn.commit()
-                
-                yesterday_consumption = get_billing_for_account(uid, email, custom_endtime=exact_leave_time)
-            else:
-                yesterday_consumption = get_billing_for_account(uid, email)
-                
-            if yesterday_consumption == 0.0:
-                continue
-        else:
-            yesterday_consumption = get_billing_for_account(uid, email)
-            
-        cursor.execute('''
-            SELECT consumption FROM daily_billing 
-            WHERE uid = %s AND date = %s
-        ''', (uid, day_before_yesterday_date))
-        day_before_yesterday_result = cursor.fetchone()
-        
-        # Since Postgres returns Decimal, we ensure conversion to float
-        day_before_yesterday_consumption = float(day_before_yesterday_result[0]) if day_before_yesterday_result else 0.0
-        
-        if day_before_yesterday_consumption > 0:
-            variation_pct = ((yesterday_consumption - day_before_yesterday_consumption) / day_before_yesterday_consumption) * 100
+        if day_before_cost > 0:
+            variation_pct = ((yesterday_cost - day_before_cost) / day_before_cost) * 100
         else:
             variation_pct = 0.0 
             
-        # The insert into daily_billing remains pure
-        cursor.execute('''
-            INSERT INTO daily_billing (date, uid, email, consumption)
-            VALUES (%s, %s, %s, %s)
-        ''', (yesterday_date, uid, email, yesterday_consumption))
-        
         trend = "⬆️" if variation_pct > 0 else "⬇️" if variation_pct < 0 else "➖"
         report.append({
             'email': email,
-            'consumption': yesterday_consumption,
+            'consumption': yesterday_cost,
             'variation': f"{trend} {round(variation_pct, 2)}%"
         })
 
-    conn.commit()
     cursor.close()
     conn.close()
     
