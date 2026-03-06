@@ -1,10 +1,11 @@
 import schedule
 import time
+import datetime
 from main import process_daily_billing
 
 def job():
     print("Iniciando a rotina de faturamento diário...")
-    process_daily_billing()
+    process_daily_billing(datetime.date.today())
     print("Rotina concluída! Aguardando o próximo ciclo...")
 
 # Schedules the job to run every day at 07:00 AM
