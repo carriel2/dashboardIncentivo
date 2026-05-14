@@ -14,6 +14,3 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copies the rest of the application code
 COPY . .
-
-# Exposes the Streamlit port
-EXPOSE 8501

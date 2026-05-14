@@ -24,7 +24,9 @@ RECEIVER_EMAILS = [email.strip() for email in receiver_emails_env.split(",")]
 # Global Configurations
 SESSION_TOKEN = os.getenv("SESSION_TOKEN")
 APPID = os.getenv("APPID", "cluster")
-URL_ACCOUNTS = "https://jca.paas.saveincloud.net.br/JBilling/billing/account/rest/getaccounts"
+URL_ACCOUNTS = (
+    "https://jca.paas.saveincloud.net.br/JBilling/billing/account/rest/getaccounts"
+)
 URL_BILLING = "https://jca.paas.saveincloud.net.br/JBilling/billing/account/rest/getaccountbillinghistorybyperiodinner"
 URL_FUNDING = "https://jca.paas.saveincloud.net.br/JBilling/billing/account/rest/getfundaccounthistory"
 
@@ -37,6 +39,7 @@ EXCLUDED_EMAILS = ["apresentacao@saveincloud.com"]
 # para evitar que o Docker congele a data de execução.
 # =========================================================================
 
+
 def get_db_connection():
     """Connects to PostgreSQL and ensures tables creation"""
     conn = psycopg2.connect(
@@ -44,13 +47,13 @@ def get_db_connection():
         database=os.getenv("DB_NAME", "billing"),
         port=os.getenv("DB_PORT", "5432"),
         user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD")
+        password=os.getenv("DB_PASSWORD"),
     )
-    
+
     cursor = conn.cursor()
-    
+
     # Table 1: Standard daily consumption
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_billing (
             id SERIAL PRIMARY KEY,
             date TIMESTAMP,
@@ -58,19 +61,19 @@ def get_db_connection():
             email VARCHAR(255),
             consumption NUMERIC(10, 4)
         )
-    ''')
-    
+    """)
+
     # Table 2: Conversions Vault
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS client_conversions (
             uid INTEGER PRIMARY KEY,
             email VARCHAR(255),
             conversion_date TIMESTAMP
         )
-    ''')
-    
+    """)
+
     # Table 3: Daily Funding (Recargas)
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_funding (
             id SERIAL PRIMARY KEY,
             date TIMESTAMP,
@@ -78,86 +81,90 @@ def get_db_connection():
             email VARCHAR(255),
             amount NUMERIC(10, 4)
         )
-    ''')
-    
+    """)
+
     conn.commit()
     cursor.close()
     return conn
 
+
 def get_accounts():
     """Fetches accounts from the billing_incentivo group"""
     params = {
-        'appid': APPID,
-        'session': SESSION_TOKEN,
-        'startRow': 0,
-        'resultCount': 100,
-        'orderField': 'email',
-        'orderDirection': 'ASC',
-        'filterField': 'group',
-        'filterValue': 'billing_incentivo',
-        'charset': 'UTF-8'
+        "appid": APPID,
+        "session": SESSION_TOKEN,
+        "startRow": 0,
+        "resultCount": 100,
+        "orderField": "email",
+        "orderDirection": "ASC",
+        "filterField": "group",
+        "filterValue": "billing_incentivo",
+        "charset": "UTF-8",
     }
     response = requests.get(URL_ACCOUNTS, params=params, timeout=30)
     data = response.json()
-    
-    if data.get('result') == 0:
-        return data.get('array', [])
+
+    if data.get("result") == 0:
+        return data.get("array", [])
     else:
         print("Error fetching accounts:", data)
         return []
 
+
 def get_conversion_time(uid, start_time, end_time):
     """Fetches the exact time a user made their first funding payment yesterday"""
     params = {
-        'appid': APPID,
-        'session': SESSION_TOKEN,
-        'uid': uid,
-        'starttime': start_time,
-        'endtime': end_time,
-        'startRow': 0,
-        'resultCount': 100,
-        'charset': 'UTF-8'
+        "appid": APPID,
+        "session": SESSION_TOKEN,
+        "uid": uid,
+        "starttime": start_time,
+        "endtime": end_time,
+        "startRow": 0,
+        "resultCount": 100,
+        "charset": "UTF-8",
     }
-    
+
     response = requests.get(URL_FUNDING, params=params, timeout=30)
     data = response.json()
-    
-    if data.get('result') == 0 and 'responses' in data:
-        fundings = [r for r in data['responses'] if r.get('chargeType') == 'FUND']
+
+    if data.get("result") == 0 and "responses" in data:
+        fundings = [r for r in data["responses"] if r.get("chargeType") == "FUND"]
         if fundings:
-            fundings.sort(key=lambda x: x['operationDate'])
-            first_funding_ms = fundings[0]['operationDate']
+            fundings.sort(key=lambda x: x["operationDate"])
+            first_funding_ms = fundings[0]["operationDate"]
             conversion_date = datetime.datetime.fromtimestamp(first_funding_ms / 1000.0)
             return conversion_date.strftime("%Y-%m-%d %H:%M:%S")
-            
-    return None 
+
+    return None
+
 
 def get_funding_amount_for_account(uid, start_time, end_time):
     """Busca o valor total recarregado pelo cliente no período"""
     params = {
-        'appid': APPID,
-        'session': SESSION_TOKEN,
-        'uid': uid,
-        'starttime': start_time,
-        'endtime': end_time,
-        'startRow': 0,
-        'resultCount': 100,
-        'charset': 'UTF-8'
+        "appid": APPID,
+        "session": SESSION_TOKEN,
+        "uid": uid,
+        "starttime": start_time,
+        "endtime": end_time,
+        "startRow": 0,
+        "resultCount": 100,
+        "charset": "UTF-8",
     }
-    
+
     response = requests.get(URL_FUNDING, params=params, timeout=30)
     data = response.json()
-    
+
     total_funding = 0.0
-    
-    if data.get('result') == 0 and 'responses' in data:
+
+    if data.get("result") == 0 and "responses" in data:
         # Pega apenas os registros do tipo 'FUND' (Pagamentos/Recargas)
-        fundings = [r for r in data['responses'] if r.get('chargeType') == 'FUND']
+        fundings = [r for r in data["responses"] if r.get("chargeType") == "FUND"]
         for f in fundings:
             # A Jelastic geralmente retorna o valor recarregado no campo 'amount'
-            total_funding += f.get('amount', 0.0) 
-            
+            total_funding += f.get("amount", 0.0)
+
     return total_funding
+
 
 def get_billing_for_account(uid, email, start_time, end_time, custom_endtime=None):
     """Fetches the consumption of a specific account for yesterday's period"""
@@ -165,42 +172,48 @@ def get_billing_for_account(uid, email, start_time, end_time, custom_endtime=Non
         custom_endtime = end_time
 
     params = {
-        'appid': APPID,
-        'session': SESSION_TOKEN,
-        'period': 'day',
-        'groupNodes': 'false',
-        'uid': uid,
-        'node': 'root',
-        'charset': 'UTF-8',
-        'starttime': start_time,
-        'endtime': custom_endtime, 
-        'email': email
+        "appid": APPID,
+        "session": SESSION_TOKEN,
+        "period": "day",
+        "groupNodes": "false",
+        "uid": uid,
+        "node": "root",
+        "charset": "UTF-8",
+        "starttime": start_time,
+        "endtime": custom_endtime,
+        "email": email,
     }
-    
+
     response = requests.get(URL_BILLING, params=params, timeout=30)
     history_data = response.json()
-    
+
     total_daily_cost = 0.0
-    
-    if history_data.get('result') == 0 and 'array' in history_data:
-        items = history_data['array']
+
+    if history_data.get("result") == 0 and "array" in history_data:
+        items = history_data["array"]
         for item in items:
-            total_daily_cost += item.get('cost', 0.0)
+            total_daily_cost += item.get("cost", 0.0)
     else:
         print(f"Warning: No consumption data found for {email}")
-            
+
     return total_daily_cost
+
 
 def send_email_report(report_data, report_date_str, report_obj_date):
     """Generates an HTML email report and sends it to the recipients"""
     msg = MIMEMultipart()
-    msg['From'] = SENDER_EMAIL
-    msg['To'] = ", ".join(RECEIVER_EMAILS)
-    msg['Subject'] = f"Resumo diário Billing Incentivo - {report_date_str}"
-    
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = ", ".join(RECEIVER_EMAILS)
+    msg["Subject"] = f"Resumo diário Billing Incentivo - {report_date_str}"
+
+    report_data_sorted = sorted(
+        report_data, key=lambda r: r["consumption"], reverse=True
+    )
+
     # 1. Calcula o total somando o consumo de todo mundo da lista
-    total_consumption = sum(row['consumption'] for row in report_data)
-    
+    total_consumption = sum(row["consumption"] for row in report_data_sorted)
+    total_clients = len(report_data_sorted)
+
     # Keeping the Email UI in Portuguese
     html_content = f"""
     <html>
@@ -211,47 +224,52 @@ def send_email_report(report_data, report_date_str, report_obj_date):
             th, td {{ border: 1px solid #dddddd; text-align: left; padding: 10px; }}
             th {{ background-color: #0056b3; color: white; }}
             tr:nth-child(even) {{ background-color: #f9f9f9; }}
+            td.rank {{ text-align: center; font-weight: bold; width: 40px;}}
             .total-row {{ background-color: #d1ecf1; font-weight: bold; color: #0c5460; }}
         </style>
     </head>
     <body>
         <h2>Resumo Billing Incentivo - {report_obj_date.strftime("%d/%m/%Y")}</h2>
         <p>Aqui está o resumo do consumo referente ao dia anterior.</p>
+        <p>Total de clientes com consumoL:</b> {total_clients}</p>
         <table>
             <tr>
+                <th>#</th>
                 <th>Email</th>
                 <th>Consumo (R$)</th>
                 <th>Variação (%)</th>
             </tr>
     """
-    
-    # 2. Preenche as linhas dos clientes
-    for row in report_data:
+
+    # 2. Preenche as linhas dos clientes já ordenadas e numeradas
+    for idx, row in enumerate(report_data_sorted, start=1):
         html_content += f"""
             <tr>
+                <td class="rank">{idx}</td>
                 <td>{row['email']}</td>
                 <td>R$ {row['consumption']:.4f}</td>
                 <td>{row['variation']}</td>
             </tr>
         """
-        
+
     # 3. Adiciona a linha do TOTAL destacada no final
     html_content += f"""
             <tr class="total-row">
+                <td class="rank">-</td>
                 <td>TOTAL GERAL</td>
                 <td>R$ {total_consumption:.4f}</td>
                 <td>➖</td>
             </tr>
         </table>
         <p style="margin-top: 20px; font-size: 12px; color: #777;">
-            <i>Relatório gerado automaticamente via Python.</i>
+            <i>Relatório gerado automaticamente via Automação - Pedro Carriel.</i>
         </p>
     </body>
     </html>
     """
-        
-    msg.attach(MIMEText(html_content, 'html'))
-    
+
+    msg.attach(MIMEText(html_content, "html"))
+
     try:
         print("\nConnecting to SMTP Server...")
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
@@ -263,130 +281,166 @@ def send_email_report(report_data, report_date_str, report_obj_date):
     except Exception as e:
         print(f"❌ Failed to send email: {e}")
 
+
 def process_daily_billing(target_today_date):
 
     yesterday_obj = target_today_date - timedelta(days=1)
-    yesterday_date = yesterday_obj.strftime("%Y-%m-%d 00:00:00") 
+    yesterday_date = yesterday_obj.strftime("%Y-%m-%d 00:00:00")
 
     day_before_yesterday_obj = yesterday_obj - timedelta(days=1)
     day_before_yesterday_date = day_before_yesterday_obj.strftime("%Y-%m-%d 00:00:00")
 
     yesterday_start_jelastic = yesterday_obj.strftime("%Y-%m-%d 00:00:00")
-    yesterday_end_jelastic = yesterday_obj.strftime("%Y-%m-%d 23:59:59") 
-    
+    yesterday_end_jelastic = yesterday_obj.strftime("%Y-%m-%d 23:59:59")
+
     conn = get_db_connection()
     cursor = conn.cursor()
-    
 
     cursor.execute("DELETE FROM daily_billing WHERE date = %s", (yesterday_date,))
     cursor.execute("DELETE FROM daily_funding WHERE date = %s", (yesterday_date,))
     conn.commit()
-    
+
     api_accounts = get_accounts()
-    
-    api_uids = {acc['uid'] for acc in api_accounts}
-    accounts_dict = {acc['uid']: acc['email'] for acc in api_accounts}
-    
-    cursor.execute('''
+
+    api_uids = {acc["uid"] for acc in api_accounts}
+    accounts_dict = {acc["uid"]: acc["email"] for acc in api_accounts}
+
+    cursor.execute(
+        """
         SELECT DISTINCT uid, email FROM daily_billing 
         WHERE date = %s
-    ''', (day_before_yesterday_date,))
+    """,
+        (day_before_yesterday_date,),
+    )
     db_accounts = cursor.fetchall()
-    
+
     for uid, email in db_accounts:
         if uid not in accounts_dict:
             accounts_dict[uid] = email
-            
-    accounts = [{'uid': uid, 'email': email} for uid, email in accounts_dict.items()]
-    
+
+    accounts = [{"uid": uid, "email": email} for uid, email in accounts_dict.items()]
+
     print(f"\n[!] Data de Referência do processamento: {yesterday_date[:10]}")
     print(f"Found {len(accounts)} accounts (API + DB). Processing costs...")
-    
+
     report = []
 
     for account in accounts:
-        uid = account['uid']
-        email = account['email']
-        
+        uid = account["uid"]
+        email = account["email"]
+
         if email in EXCLUDED_EMAILS:
             continue
-            
+
         is_in_api = uid in api_uids
-        
+
         if not is_in_api:
-            exact_leave_time = get_conversion_time(uid, yesterday_start_jelastic, yesterday_end_jelastic)
-            
+            exact_leave_time = get_conversion_time(
+                uid, yesterday_start_jelastic, yesterday_end_jelastic
+            )
+
             if exact_leave_time:
-                cursor.execute('''
+                cursor.execute(
+                    """
                     INSERT INTO client_conversions (uid, email, conversion_date)
                     VALUES (%s, %s, %s)
                     ON CONFLICT (uid) DO NOTHING
-                ''', (uid, email, exact_leave_time))
+                """,
+                    (uid, email, exact_leave_time),
+                )
                 conn.commit()
-                
-                yesterday_consumption = get_billing_for_account(uid, email, yesterday_start_jelastic, yesterday_end_jelastic, custom_endtime=exact_leave_time)
+
+                yesterday_consumption = get_billing_for_account(
+                    uid,
+                    email,
+                    yesterday_start_jelastic,
+                    yesterday_end_jelastic,
+                    custom_endtime=exact_leave_time,
+                )
             else:
-                yesterday_consumption = get_billing_for_account(uid, email, yesterday_start_jelastic, yesterday_end_jelastic)
-                
+                yesterday_consumption = get_billing_for_account(
+                    uid, email, yesterday_start_jelastic, yesterday_end_jelastic
+                )
+
             if yesterday_consumption == 0.0:
                 continue
         else:
-            yesterday_consumption = get_billing_for_account(uid, email, yesterday_start_jelastic, yesterday_end_jelastic)
-            
-        cursor.execute('''
+            yesterday_consumption = get_billing_for_account(
+                uid, email, yesterday_start_jelastic, yesterday_end_jelastic
+            )
+
+        cursor.execute(
+            """
             SELECT consumption FROM daily_billing 
             WHERE uid = %s AND date = %s
-        ''', (uid, day_before_yesterday_date))
+        """,
+            (uid, day_before_yesterday_date),
+        )
         day_before_yesterday_result = cursor.fetchone()
-        
-        day_before_yesterday_consumption = float(day_before_yesterday_result[0]) if day_before_yesterday_result else 0.0
-        
+
+        day_before_yesterday_consumption = (
+            float(day_before_yesterday_result[0])
+            if day_before_yesterday_result
+            else 0.0
+        )
+
         if day_before_yesterday_consumption > 0:
-            variation_pct = ((yesterday_consumption - day_before_yesterday_consumption) / day_before_yesterday_consumption) * 100
+            variation_pct = (
+                (yesterday_consumption - day_before_yesterday_consumption)
+                / day_before_yesterday_consumption
+            ) * 100
         else:
-            variation_pct = 0.0 
-            
-        cursor.execute('''
+            variation_pct = 0.0
+
+        cursor.execute(
+            """
             INSERT INTO daily_billing (date, uid, email, consumption)
             VALUES (%s, %s, %s, %s)
-        ''', (yesterday_date, uid, email, yesterday_consumption))
-        
-        yesterday_funding = get_funding_amount_for_account(uid, yesterday_start_jelastic, yesterday_end_jelastic)
-        
+        """,
+            (yesterday_date, uid, email, yesterday_consumption),
+        )
+
+        yesterday_funding = get_funding_amount_for_account(
+            uid, yesterday_start_jelastic, yesterday_end_jelastic
+        )
+
         if yesterday_funding > 0.0:
-            cursor.execute('''
+            cursor.execute(
+                """
                 INSERT INTO daily_funding (date, uid, email, amount)
                 VALUES (%s, %s, %s, %s)
-            ''', (yesterday_date, uid, email, yesterday_funding))
-        
-        
+            """,
+                (yesterday_date, uid, email, yesterday_funding),
+            )
+
         trend = "⬆️" if variation_pct > 0 else "⬇️" if variation_pct < 0 else "➖"
-        report.append({
-            'email': email,
-            'consumption': yesterday_consumption,
-            'variation': f"{trend} {round(variation_pct, 2)}%"
-        })
+        report.append(
+            {
+                "email": email,
+                "consumption": yesterday_consumption,
+                "variation": f"{trend} {round(variation_pct, 2)}%",
+            }
+        )
 
     conn.commit()
     cursor.close()
     conn.close()
-    
+
     print("--- Preliminary Report ---")
     for r in report:
         print(f"{r['email']} | R$ {r['consumption']:.4f} | {r['variation']}")
-
 
     if report:
         send_email_report(report, yesterday_date[:10], yesterday_obj)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # ====================================================================
     # 🟢 MODO BACKFILL (MÁQUINA DO TEMPO)
     # Descomente este bloco, rode o script, e ele vai reprocessar o passado.
     # Após rodar com sucesso, comente isso aqui de volta!
     # ====================================================================
-    
+
     #  dates_to_fix = [
     #      datetime.date(2026, 3, 2), # Vai apagar e refazer o dia 01/03
     #      datetime.date(2026, 3, 3), # Vai apagar e refazer o dia 02/03
@@ -395,12 +449,11 @@ if __name__ == '__main__':
     #  ]
     #  for d in dates_to_fix:
     #      process_daily_billing(d)
-        
-    
+
     # ====================================================================
     # 🔵 MODO PRODUÇÃO NORMAL
     # É isso que deve ficar ativado lá no Docker da SaveinCloud.
     # A data do momento em que a função dispara!
     # ====================================================================
-    
+
     process_daily_billing(datetime.date.today())
